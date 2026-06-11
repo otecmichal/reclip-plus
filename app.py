@@ -4,6 +4,7 @@ import glob
 import json
 import subprocess
 import threading
+import time
 from flask import Flask, request, jsonify, send_file, render_template
 
 app = Flask(__name__)
@@ -11,6 +12,48 @@ DOWNLOAD_DIR = os.path.join(os.path.dirname(__file__), "downloads")
 os.makedirs(DOWNLOAD_DIR, exist_ok=True)
 
 jobs = {}
+
+
+def cleanup_old_jobs():
+    while True:
+        try:
+            now = time.time()
+            cutoff = now - 86400  # 24 hours
+
+            # 1. Clean up jobs dictionary and their files
+            expired_job_ids = []
+            for job_id, job in list(jobs.items()):
+                created_at = job.get("created_at")
+                if created_at and created_at < cutoff:
+                    expired_job_ids.append(job_id)
+
+            for job_id in expired_job_ids:
+                job = jobs.pop(job_id, None)
+                if job and "file" in job:
+                    try:
+                        if os.path.exists(job["file"]):
+                            os.remove(job["file"])
+                    except OSError:
+                        pass
+
+            # 2. Clean up any orphaned files in DOWNLOAD_DIR older than 24h
+            for filename in os.listdir(DOWNLOAD_DIR):
+                file_path = os.path.join(DOWNLOAD_DIR, filename)
+                if os.path.isfile(file_path):
+                    try:
+                        mtime = os.path.getmtime(file_path)
+                        if mtime < cutoff:
+                            os.remove(file_path)
+                    except OSError:
+                        pass
+        except Exception:
+            pass
+
+        time.sleep(3600)  # Check every hour
+
+
+cleanup_thread = threading.Thread(target=cleanup_old_jobs, daemon=True)
+cleanup_thread.start()
 
 
 def run_download(job_id, url, format_choice, format_id):
@@ -136,7 +179,12 @@ def start_download():
         return jsonify({"error": "No URL provided"}), 400
 
     job_id = uuid.uuid4().hex[:10]
-    jobs[job_id] = {"status": "downloading", "url": url, "title": title}
+    jobs[job_id] = {
+        "status": "downloading",
+        "url": url,
+        "title": title,
+        "created_at": time.time(),
+    }
 
     thread = threading.Thread(target=run_download, args=(job_id, url, format_choice, format_id))
     thread.daemon = True
