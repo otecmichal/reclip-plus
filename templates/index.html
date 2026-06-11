@@ -408,6 +408,21 @@
   </div>
 
   <script>
+    const BASE_PATH = (() => {
+      const pathName = window.location.pathname;
+      const segments = pathName.split('/').filter(Boolean);
+      if (segments.length && (segments[segments.length - 1] === 'index.html' || segments[segments.length - 1].endsWith('.html'))) {
+        segments.pop();
+      }
+      return segments.length ? '/' + segments.join('/') : '';
+    })();
+
+    // Set favicon path dynamically based on BASE_PATH
+    const favicon = document.querySelector('link[rel="icon"]');
+    if (favicon) {
+      favicon.href = BASE_PATH + '/static/favicon.svg';
+    }
+
     let currentFormat = 'video';
     let cardData = [];
 
@@ -469,7 +484,7 @@
         renderCard(idx);
 
         try {
-          const res = await fetch('/api/info', {
+          const res = await fetch(BASE_PATH + '/api/info', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ url }),
@@ -610,7 +625,7 @@
       renderCard(idx);
 
       try {
-        const res = await fetch('/api/download', {
+        const res = await fetch(BASE_PATH + '/api/download', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
@@ -640,7 +655,7 @@
       const c = cardData[idx];
       const iv = setInterval(async () => {
         try {
-          const res = await fetch(`/api/status/${c.jobId}`);
+          const res = await fetch(`${BASE_PATH}/api/status/${c.jobId}`);
           const data = await res.json();
           if (data.status === 'done') {
             clearInterval(iv);
@@ -667,7 +682,7 @@
       const c = cardData[idx];
       if (!c.jobId) return;
       const a = document.createElement('a');
-      a.href = `/api/file/${c.jobId}`;
+      a.href = `${BASE_PATH}/api/file/${c.jobId}`;
       a.download = c.filename || '';
       a.click();
     }
