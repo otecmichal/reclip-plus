@@ -6,10 +6,56 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>ReClip — Free Media Downloader</title>
   <link rel="icon" href="/static/favicon.svg" type="image/svg+xml">
-  <link rel="preconnect" href="https://fonts.googleapis.com">
-  <link
-    href="https://fonts.googleapis.com/css2?family=Instrument+Serif:ital@0;1&family=DM+Mono:wght@400;500&display=swap"
-    rel="stylesheet">
+  <script>
+    const BASE_PATH = (() => {
+      const pathName = window.location.pathname;
+      const segments = pathName.split('/').filter(Boolean);
+      if (segments.length && (segments[segments.length - 1] === 'index.html' || segments[segments.length - 1].endsWith('.html'))) {
+        segments.pop();
+      }
+      return segments.length ? '/' + segments.join('/') : '';
+    })();
+
+    // Set favicon path dynamically based on BASE_PATH
+    const favicon = document.querySelector('link[rel="icon"]');
+    if (favicon) {
+      favicon.href = BASE_PATH + '/static/favicon.svg';
+    }
+
+    // Inject local fonts dynamically with correct BASE_PATH
+    const fontStyle = document.createElement('style');
+    fontStyle.textContent = `
+      @font-face {
+        font-family: 'DM Mono';
+        font-style: normal;
+        font-weight: 400;
+        font-display: swap;
+        src: url('${BASE_PATH}/static/fonts/dm-mono-400.woff2') format('woff2');
+      }
+      @font-face {
+        font-family: 'DM Mono';
+        font-style: normal;
+        font-weight: 500;
+        font-display: swap;
+        src: url('${BASE_PATH}/static/fonts/dm-mono-500.woff2') format('woff2');
+      }
+      @font-face {
+        font-family: 'Instrument Serif';
+        font-style: italic;
+        font-weight: 400;
+        font-display: swap;
+        src: url('${BASE_PATH}/static/fonts/instrument-serif-italic.woff2') format('woff2');
+      }
+      @font-face {
+        font-family: 'Instrument Serif';
+        font-style: normal;
+        font-weight: 400;
+        font-display: swap;
+        src: url('${BASE_PATH}/static/fonts/instrument-serif-regular.woff2') format('woff2');
+      }
+    `;
+    document.head.appendChild(fontStyle);
+  </script>
   <style>
     :root {
       --bg: #f4f1eb;
@@ -542,21 +588,6 @@
   </div>
 
   <script>
-    const BASE_PATH = (() => {
-      const pathName = window.location.pathname;
-      const segments = pathName.split('/').filter(Boolean);
-      if (segments.length && (segments[segments.length - 1] === 'index.html' || segments[segments.length - 1].endsWith('.html'))) {
-        segments.pop();
-      }
-      return segments.length ? '/' + segments.join('/') : '';
-    })();
-
-    // Set favicon path dynamically based on BASE_PATH
-    const favicon = document.querySelector('link[rel="icon"]');
-    if (favicon) {
-      favicon.href = BASE_PATH + '/static/favicon.svg';
-    }
-
     let currentFormat = 'video';
     let cardData = [];
 
