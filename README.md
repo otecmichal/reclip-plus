@@ -19,6 +19,15 @@ https://github.com/user-attachments/assets/419d3e50-c933-444b-8cab-a9724986ba05
 - Clean, responsive UI — no frameworks, no build step
 - Single Python file backend (~150 lines)
 
+## Fork Improvements (ReClip Plus)
+
+This repository is a fork of the original [reclip](https://github.com/averygan/reclip) with several enhancements and operational features:
+
+- **Reverse Proxy Prefix Routing**: Dynamic frontend `BASE_PATH` detection enables routing under custom reverse proxy subpaths (for example Traefik's `/reclip` prefix rule) without breaking static assets or API endpoints.
+- **Automatic Disk Cleanup**: Added an hourly background daemon thread cleanup routine in Python that automatically purges downloaded media files and job metadata older than 24 hours to protect disk space.
+- **Platform Bypass Integration**: Updated the Dockerfile and requirements to install Deno and `yt-dlp-ejs` to resolve client-side JavaScript challenges (such as YouTube's signature and Proof-of-Work/POT player verification).
+
+
 ## Quick Start
 
 ```bash
