@@ -5,6 +5,7 @@ import json
 import subprocess
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 from flask import Flask, request, jsonify, send_file, render_template
 
 app = Flask(__name__)
@@ -12,6 +13,7 @@ DOWNLOAD_DIR = os.path.join(os.path.dirname(__file__), "downloads")
 os.makedirs(DOWNLOAD_DIR, exist_ok=True)
 
 jobs = {}
+download_executor = ThreadPoolExecutor(max_workers=5)
 
 
 def cleanup_old_jobs():
@@ -64,6 +66,7 @@ cleanup_thread.start()
 
 def run_download(job_id, url, format_choice, format_id):
     job = jobs[job_id]
+    job["status"] = "downloading"
 
     # Capture fresh metadata via yt-dlp -j
     uploader = "Unknown"
@@ -89,7 +92,7 @@ def run_download(job_id, url, format_choice, format_id):
         "uploader": uploader,
         "format_choice": format_choice,
         "status": "downloading",
-        "created_at": time.time()
+        "created_at": job.get("created_at", time.time())
     }
 
     def save_meta():
@@ -103,7 +106,15 @@ def run_download(job_id, url, format_choice, format_id):
 
     out_template = os.path.join(DOWNLOAD_DIR, f"{job_id}.%(ext)s")
 
-    cmd = ["yt-dlp", "--no-playlist", "--newline", "-o", out_template]
+    cmd = [
+        "yt-dlp",
+        "--no-playlist",
+        "--newline",
+        "--progress-template",
+        "download-progress:%(progress.downloaded_bytes)s/%(progress.total_bytes)s/%(progress.total_bytes_estimate)s/%(progress.speed)s/%(progress.eta)s",
+        "-o",
+        out_template
+    ]
 
     if format_choice == "audio":
         cmd += ["-x", "--audio-format", "mp3"]
@@ -129,6 +140,30 @@ def run_download(job_id, url, format_choice, format_id):
             for line in iter(process.stdout.readline, ""):
                 print(f"[yt-dlp {job_id}] {line}", end="", flush=True)
                 output_lines.append(line)
+
+                # Parse progress lines
+                if line.startswith("download-progress:"):
+                    try:
+                        payload = line.strip().split(":", 1)[1]
+                        fields = payload.split("/")
+                        downloaded = int(fields[0])
+                        total = int(fields[1]) if fields[1] != "NA" else None
+                        estimate = int(fields[2]) if fields[2] != "NA" else None
+                        speed = float(fields[3]) if fields[3] != "NA" else None
+                        eta = int(fields[4]) if fields[4] != "NA" else None
+
+                        total_bytes = total if total is not None else estimate
+                        percent = (downloaded / total_bytes * 100) if total_bytes else None
+
+                        job["progress"] = {
+                            "percent": round(percent, 1) if percent is not None else None,
+                            "downloaded_mb": round(downloaded / (1024 * 1024), 2),
+                            "total_mb": round(total_bytes / (1024 * 1024), 2) if total_bytes else None,
+                            "speed_mbps": round(speed / (1024 * 1024), 2) if speed else None,
+                            "eta_seconds": eta
+                        }
+                    except (IndexError, ValueError):
+                        pass
 
         reader_thread = threading.Thread(target=read_output, daemon=True)
         reader_thread.start()
@@ -275,16 +310,35 @@ def start_download():
         return jsonify({"error": "No URL provided"}), 400
 
     job_id = uuid.uuid4().hex[:10]
+    created_at = time.time()
+    
     jobs[job_id] = {
-        "status": "downloading",
+        "status": "queued",
         "url": url,
         "title": title,
-        "created_at": time.time(),
+        "format_choice": format_choice,
+        "created_at": created_at,
     }
 
-    thread = threading.Thread(target=run_download, args=(job_id, url, format_choice, format_id))
-    thread.daemon = True
-    thread.start()
+    # Save initial metadata file as queued so list_downloads reads it correctly immediately
+    try:
+        meta_path = os.path.join(DOWNLOAD_DIR, f"{job_id}.txt")
+        meta_data = {
+            "job_id": job_id,
+            "url": url,
+            "title": title,
+            "uploader": "Unknown",
+            "format_choice": format_choice,
+            "status": "queued",
+            "created_at": created_at
+        }
+        with open(meta_path, "w", encoding="utf-8") as f:
+            json.dump(meta_data, f, indent=2)
+    except Exception:
+        pass
+
+    # Submit job to the ThreadPoolExecutor queue
+    download_executor.submit(run_download, job_id, url, format_choice, format_id)
 
     return jsonify({"job_id": job_id})
 
@@ -293,11 +347,25 @@ def start_download():
 def check_status(job_id):
     job = jobs.get(job_id)
     if not job:
+        # Fallback to check if a metadata file exists (in case of server restart)
+        meta_path = os.path.join(DOWNLOAD_DIR, f"{job_id}.txt")
+        if os.path.exists(meta_path):
+            try:
+                with open(meta_path, "r", encoding="utf-8") as f:
+                    meta = json.load(f)
+                return jsonify({
+                    "status": meta.get("status"),
+                    "error": meta.get("error"),
+                    "filename": meta.get("filename"),
+                })
+            except Exception:
+                pass
         return jsonify({"error": "Job not found"}), 404
     return jsonify({
         "status": job["status"],
         "error": job.get("error"),
         "filename": job.get("filename"),
+        "progress": job.get("progress"),
     })
 
 
@@ -327,7 +395,14 @@ def list_downloads():
                     else:
                         media_files.append(f)
 
-            if media_files:
+            active_job = jobs.get(job_id)
+            if active_job:
+                meta["status"] = active_job["status"]
+                if "error" in active_job:
+                    meta["error"] = active_job["error"]
+                if "progress" in active_job:
+                    meta["progress"] = active_job["progress"]
+            elif media_files:
                 meta["status"] = "done"
                 # If filename is missing, reconstruct it
                 if not meta.get("filename"):
@@ -341,8 +416,8 @@ def list_downloads():
             elif part_files:
                 meta["status"] = "downloading"
             else:
-                # If metadata says "downloading" but process is not running, treat it as error
-                if meta.get("status") == "downloading":
+                # If metadata says "downloading" or "queued" but job is not in memory and no files are found, mark error
+                if meta.get("status") in ("downloading", "queued"):
                     meta["status"] = "error"
                     meta["error"] = "Interrupted or failed"
 

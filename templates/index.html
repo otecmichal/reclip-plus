@@ -879,8 +879,19 @@
       let actionHtml = '';
       if (c.status === 'ready') {
         actionHtml = `<button class="card-dl-btn" onclick="dlCard(${idx})">Download</button>${qualityChips}`;
+      } else if (c.status === 'queued') {
+        actionHtml = `<span class="card-status downloading"><span class="spin"></span> Queued...</span>`;
       } else if (c.status === 'downloading') {
-        actionHtml = `<span class="card-status downloading"><span class="spin"></span> Downloading...</span>`;
+        let progText = 'Downloading...';
+        if (c.progress) {
+          const p = c.progress;
+          const pct = p.percent !== null ? `${p.percent}% ` : '';
+          const mb = p.total_mb ? `${p.downloaded_mb}/${p.total_mb} MB` : `${p.downloaded_mb} MB`;
+          const speed = p.speed_mbps ? ` @ ${p.speed_mbps} MB/s` : '';
+          const eta = p.eta_seconds !== null ? ` (ETA ${p.eta_seconds}s)` : '';
+          progText = `Downloading ${pct}(${mb})${speed}${eta}`;
+        }
+        actionHtml = `<span class="card-status downloading"><span class="spin"></span> ${esc(progText)}</span>`;
       } else if (c.status === 'done') {
         actionHtml = `<button class="card-dl-btn done" onclick="saveCard(${idx})">Save</button>
           <span class="card-status done">${esc(c.filename || '')}</span>`;
@@ -917,7 +928,7 @@
 
     async function dlCard(idx) {
       const c = cardData[idx];
-      c.status = 'downloading';
+      c.status = 'queued';
       c.error = null;
       renderCard(idx);
 
@@ -960,6 +971,7 @@
             clearInterval(iv);
             c.status = 'done';
             c.filename = data.filename;
+            c.progress = null;
             renderCard(idx);
             saveCard(idx);
             loadDownloadsList();
@@ -967,8 +979,22 @@
             clearInterval(iv);
             c.status = 'error';
             c.error = data.error;
+            c.progress = null;
             renderCard(idx);
             loadDownloadsList();
+          } else {
+            let changed = false;
+            if (c.status !== data.status) {
+              c.status = data.status;
+              changed = true;
+            }
+            if (data.progress) {
+              c.progress = data.progress;
+              changed = true;
+            }
+            if (changed) {
+              renderCard(idx);
+            }
           }
         } catch {
           clearInterval(iv);
@@ -1021,7 +1047,7 @@
         data.forEach(item => {
           const row = document.createElement('div');
           row.className = 'download-item';
-          if (item.status === 'downloading') {
+          if (item.status === 'downloading' || item.status === 'queued') {
             row.classList.add('downloading');
           }
           
@@ -1034,8 +1060,17 @@
           let actionHtml = '';
           if (item.status === 'done') {
             actionHtml = `<a href="${BASE_PATH}/api/file/${job_id}" class="dl-link" download="${esc(item.filename || '')}">Download</a>`;
+          } else if (item.status === 'queued') {
+            actionHtml = `<span class="dl-status-text downloading"><span class="spin"></span> Queued...</span>`;
           } else if (item.status === 'downloading') {
-            actionHtml = `<span class="dl-status-text downloading"><span class="spin"></span> Downloading...</span>`;
+            let progText = 'Downloading...';
+            if (item.progress) {
+              const p = item.progress;
+              const pct = p.percent !== null ? `${p.percent}% ` : '';
+              const mb = p.total_mb ? `${p.downloaded_mb}/${p.total_mb} MB` : `${p.downloaded_mb} MB`;
+              progText = `Downloading ${pct}(${mb})`;
+            }
+            actionHtml = `<span class="dl-status-text downloading"><span class="spin"></span> ${esc(progText)}</span>`;
           } else {
             actionHtml = `<span class="dl-status-text error">Failed</span>`;
           }
