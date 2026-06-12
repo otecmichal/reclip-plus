@@ -114,7 +114,11 @@ def run_download(job_id, url, format_choice, format_id):
         "--progress-template",
         "download-progress:%(progress.downloaded_bytes)s/%(progress.total_bytes)s/%(progress.total_bytes_estimate)s/%(progress.speed)s/%(progress.eta)s",
         "-o",
-        out_template
+        out_template,
+        "--downloader",
+        "aria2c",
+        "--downloader-args",
+        "aria2c:-j 8 -x 8 -s 8 -k 1M"
     ]
 
     if format_choice == "audio":

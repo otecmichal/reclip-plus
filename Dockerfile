@@ -7,9 +7,9 @@ FROM python:3.12-slim
 # Copy the Deno binary from Stage 1
 COPY --from=deno-bin /deno /usr/local/bin/deno
 
-# Install ffmpeg
+# Install ffmpeg and aria2
 RUN apt-get update && \
-    apt-get install -y --no-install-recommends ffmpeg && \
+    apt-get install -y --no-install-recommends ffmpeg aria2 && \
     rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
