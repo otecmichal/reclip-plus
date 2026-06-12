@@ -3,6 +3,7 @@ import uuid
 import glob
 import json
 import subprocess
+import shlex
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -124,6 +125,9 @@ def run_download(job_id, url, format_choice, format_id):
         cmd += ["-f", "bestvideo+bestaudio/best", "--merge-output-format", "mp4"]
 
     cmd.append(url)
+
+    meta_data["command"] = shlex.join(cmd)
+    save_meta()
 
     try:
         process = subprocess.Popen(
