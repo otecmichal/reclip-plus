@@ -150,11 +150,11 @@ def run_download(job_id, url, format_choice, format_id):
                     try:
                         payload = line.strip().split(":", 1)[1]
                         fields = payload.split("/")
-                        downloaded = int(fields[0])
-                        total = int(fields[1]) if fields[1] != "NA" else None
-                        estimate = int(fields[2]) if fields[2] != "NA" else None
-                        speed = float(fields[3]) if fields[3] != "NA" else None
-                        eta = int(fields[4]) if fields[4] != "NA" else None
+                        downloaded = int(float(fields[0]))
+                        total = int(float(fields[1])) if fields[1] not in ("NA", "None", "null") else None
+                        estimate = int(float(fields[2])) if fields[2] not in ("NA", "None", "null") else None
+                        speed = float(fields[3]) if fields[3] not in ("NA", "None", "null") else None
+                        eta = int(float(fields[4])) if fields[4] not in ("NA", "None", "null") else None
 
                         total_bytes = total if total is not None else estimate
                         percent = (downloaded / total_bytes * 100) if total_bytes else None
