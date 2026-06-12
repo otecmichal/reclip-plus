@@ -35,6 +35,12 @@ def cleanup_old_jobs():
                             os.remove(job["file"])
                     except OSError:
                         pass
+                try:
+                    meta_file = os.path.join(DOWNLOAD_DIR, f"{job_id}.txt")
+                    if os.path.exists(meta_file):
+                        os.remove(meta_file)
+                except OSError:
+                    pass
 
             # 2. Clean up any orphaned files in DOWNLOAD_DIR older than 24h
             for filename in os.listdir(DOWNLOAD_DIR):
@@ -58,9 +64,46 @@ cleanup_thread.start()
 
 def run_download(job_id, url, format_choice, format_id):
     job = jobs[job_id]
+
+    # Capture fresh metadata via yt-dlp -j
+    uploader = "Unknown"
+    title = job.get("title", "")
+    try:
+        info_cmd = ["yt-dlp", "--no-playlist", "-j", url]
+        info_res = subprocess.run(info_cmd, capture_output=True, text=True, timeout=30)
+        if info_res.returncode == 0:
+            info_data = json.loads(info_res.stdout)
+            title = info_data.get("title", title)
+            uploader = info_data.get("uploader", "Unknown")
+            job["title"] = title
+            job["uploader"] = uploader
+    except Exception:
+        pass
+
+    # Save initial metadata file
+    meta_path = os.path.join(DOWNLOAD_DIR, f"{job_id}.txt")
+    meta_data = {
+        "job_id": job_id,
+        "url": url,
+        "title": title,
+        "uploader": uploader,
+        "format_choice": format_choice,
+        "status": "downloading",
+        "created_at": time.time()
+    }
+
+    def save_meta():
+        try:
+            with open(meta_path, "w", encoding="utf-8") as f:
+                json.dump(meta_data, f, indent=2)
+        except Exception:
+            pass
+
+    save_meta()
+
     out_template = os.path.join(DOWNLOAD_DIR, f"{job_id}.%(ext)s")
 
-    cmd = ["yt-dlp", "--no-playlist", "-o", out_template]
+    cmd = ["yt-dlp", "--no-playlist", "--newline", "-o", out_template]
 
     if format_choice == "audio":
         cmd += ["-x", "--audio-format", "mp3"]
@@ -72,16 +115,56 @@ def run_download(job_id, url, format_choice, format_id):
     cmd.append(url)
 
     try:
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
-        if result.returncode != 0:
+        process = subprocess.Popen(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            bufsize=1
+        )
+
+        output_lines = []
+
+        def read_output():
+            for line in iter(process.stdout.readline, ""):
+                print(f"[yt-dlp {job_id}] {line}", end="", flush=True)
+                output_lines.append(line)
+
+        reader_thread = threading.Thread(target=read_output, daemon=True)
+        reader_thread.start()
+
+        try:
+            return_code = process.wait(timeout=300)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            reader_thread.join(timeout=5)
+            raise
+
+        reader_thread.join(timeout=5)
+
+        if return_code != 0:
             job["status"] = "error"
-            job["error"] = result.stderr.strip().split("\n")[-1]
+            last_line = ""
+            for line in reversed(output_lines):
+                cleaned = line.strip()
+                if cleaned:
+                    last_line = cleaned
+                    break
+            job["error"] = last_line or f"yt-dlp exited with code {return_code}"
+
+            meta_data["status"] = "error"
+            meta_data["error"] = job["error"]
+            save_meta()
             return
 
         files = glob.glob(os.path.join(DOWNLOAD_DIR, f"{job_id}.*"))
         if not files:
             job["status"] = "error"
             job["error"] = "Download completed but no file was found"
+
+            meta_data["status"] = "error"
+            meta_data["error"] = job["error"]
+            save_meta()
             return
 
         if format_choice == "audio":
@@ -108,12 +191,25 @@ def run_download(job_id, url, format_choice, format_id):
             job["filename"] = f"{safe_title}{ext}" if safe_title else os.path.basename(chosen)
         else:
             job["filename"] = os.path.basename(chosen)
+
+        meta_data["status"] = "done"
+        meta_data["filename"] = job["filename"]
+        save_meta()
+
     except subprocess.TimeoutExpired:
         job["status"] = "error"
         job["error"] = "Download timed out (5 min limit)"
+
+        meta_data["status"] = "error"
+        meta_data["error"] = job["error"]
+        save_meta()
     except Exception as e:
         job["status"] = "error"
         job["error"] = str(e)
+
+        meta_data["status"] = "error"
+        meta_data["error"] = job["error"]
+        save_meta()
 
 
 @app.route("/")
@@ -205,9 +301,91 @@ def check_status(job_id):
     })
 
 
+@app.route("/api/downloads")
+def list_downloads():
+    results = []
+    if not os.path.exists(DOWNLOAD_DIR):
+        return jsonify(results)
+
+    for filename in os.listdir(DOWNLOAD_DIR):
+        if filename.endswith(".txt"):
+            meta_path = os.path.join(DOWNLOAD_DIR, filename)
+            job_id = filename[:-4]
+            try:
+                with open(meta_path, "r", encoding="utf-8") as f:
+                    meta = json.load(f)
+            except Exception:
+                continue
+
+            # Verify the status dynamically based on files in DOWNLOAD_DIR
+            media_files = []
+            part_files = []
+            for f in os.listdir(DOWNLOAD_DIR):
+                if f.startswith(job_id) and f != filename:
+                    if f.endswith(".part") or f.endswith(".ytdl"):
+                        part_files.append(f)
+                    else:
+                        media_files.append(f)
+
+            if media_files:
+                meta["status"] = "done"
+                # If filename is missing, reconstruct it
+                if not meta.get("filename"):
+                    ext = os.path.splitext(media_files[0])[1]
+                    title = meta.get("title", "").strip()
+                    if title:
+                        safe_title = "".join(c for c in title if c not in r'\/:*?"<>|').strip()[:20].strip()
+                        meta["filename"] = f"{safe_title}{ext}" if safe_title else media_files[0]
+                    else:
+                        meta["filename"] = media_files[0]
+            elif part_files:
+                meta["status"] = "downloading"
+            else:
+                # If metadata says "downloading" but process is not running, treat it as error
+                if meta.get("status") == "downloading":
+                    meta["status"] = "error"
+                    meta["error"] = "Interrupted or failed"
+
+            results.append(meta)
+
+    # Sort results by created_at descending (newest first)
+    results.sort(key=lambda x: x.get("created_at", 0), reverse=True)
+    return jsonify(results)
+
+
 @app.route("/api/file/<job_id>")
 def download_file(job_id):
     job = jobs.get(job_id)
+    if not job:
+        # Fallback to metadata .txt file if job is not in memory (e.g. server restart)
+        meta_path = os.path.join(DOWNLOAD_DIR, f"{job_id}.txt")
+        if os.path.exists(meta_path):
+            try:
+                with open(meta_path, "r", encoding="utf-8") as f:
+                    meta = json.load(f)
+                
+                # Check for media file
+                media_file = None
+                for f in os.listdir(DOWNLOAD_DIR):
+                    if f.startswith(job_id) and f != f"{job_id}.txt":
+                        if not (f.endswith(".part") or f.endswith(".ytdl")):
+                            media_file = os.path.join(DOWNLOAD_DIR, f)
+                            break
+                
+                if media_file:
+                    filename = meta.get("filename")
+                    if not filename:
+                        ext = os.path.splitext(media_file)[1]
+                        title = meta.get("title", "").strip()
+                        if title:
+                            safe_title = "".join(c for c in title if c not in r'\/:*?"<>|').strip()[:20].strip()
+                            filename = f"{safe_title}{ext}" if safe_title else os.path.basename(media_file)
+                        else:
+                            filename = os.path.basename(media_file)
+                    return send_file(media_file, as_attachment=True, download_name=filename)
+            except Exception:
+                pass
+
     if not job or job["status"] != "done":
         return jsonify({"error": "File not ready"}), 404
     return send_file(job["file"], as_attachment=True, download_name=job["filename"])
