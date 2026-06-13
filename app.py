@@ -9,6 +9,8 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 from flask import Flask, request, jsonify, send_file, render_template
 
+from cookie_harvester import start_harvester, COOKIE_FILE
+
 app = Flask(__name__)
 DOWNLOAD_DIR = os.path.join(os.path.dirname(__file__), "downloads")
 os.makedirs(DOWNLOAD_DIR, exist_ok=True)
@@ -64,6 +66,8 @@ def cleanup_old_jobs():
 cleanup_thread = threading.Thread(target=cleanup_old_jobs, daemon=True)
 cleanup_thread.start()
 
+start_harvester()
+
 
 def run_download(job_id, url, format_choice, format_id):
     job = jobs[job_id]
@@ -73,7 +77,10 @@ def run_download(job_id, url, format_choice, format_id):
     uploader = "Unknown"
     title = job.get("title", "")
     try:
-        info_cmd = ["yt-dlp", "--no-playlist", "-j", url]
+        info_cmd = ["yt-dlp", "--no-playlist", "-j"]
+        if os.path.exists(COOKIE_FILE):
+            info_cmd.extend(["--cookies", COOKIE_FILE])
+        info_cmd.append(url)
         info_res = subprocess.run(info_cmd, capture_output=True, text=True, timeout=30)
         if info_res.returncode == 0:
             info_data = json.loads(info_res.stdout)
@@ -114,12 +121,21 @@ def run_download(job_id, url, format_choice, format_id):
         "--progress-template",
         "download-progress:%(progress.downloaded_bytes)s/%(progress.total_bytes)s/%(progress.total_bytes_estimate)s/%(progress.speed)s/%(progress.eta)s",
         "-o",
-        out_template,
-        "--downloader",
-        "aria2c",
-        "--downloader-args",
-        "aria2c:-j 8 -x 8 -s 8 -k 1M"
+        out_template
     ]
+
+    use_aria2c = os.environ.get("USE_ARIA2C", "").lower() == "true"
+    if use_aria2c:
+        threads = os.environ.get("USE_ARIA2C_THREADS", "8")
+        cmd.extend([
+            "--downloader",
+            "aria2c",
+            "--downloader-args",
+            f"aria2c:-j {threads} -x {threads} -s {threads} -k 1M"
+        ])
+
+    if os.path.exists(COOKIE_FILE):
+        cmd.extend(["--cookies", COOKIE_FILE])
 
     if format_choice == "audio":
         cmd += ["-x", "--audio-format", "mp3"]
@@ -267,7 +283,10 @@ def get_info():
     if not url:
         return jsonify({"error": "No URL provided"}), 400
 
-    cmd = ["yt-dlp", "--no-playlist", "-j", url]
+    cmd = ["yt-dlp", "--no-playlist", "-j"]
+    if os.path.exists(COOKIE_FILE):
+        cmd.extend(["--cookies", COOKIE_FILE])
+    cmd.append(url)
     try:
         result = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
         if result.returncode != 0:
