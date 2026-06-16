@@ -9,7 +9,12 @@ def harvest_cookies():
     while True:
         try:
             # Lean cookie harvesting using curl to get a basic cookie jar from YouTube
-            subprocess.run(["curl", "-c", COOKIE_FILE, "-s", "https://www.youtube.com"], check=False)
+            subprocess.run(
+                ["curl", "-c", COOKIE_FILE, "-s", "-o", os.devnull, "https://www.youtube.com"],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                check=False
+            )
             print("Cookie jar updated via curl")
         except Exception as e:
             print(f"Error harvesting cookies: {e}")
