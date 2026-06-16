@@ -7,13 +7,36 @@ import shlex
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
-from flask import Flask, request, jsonify, send_file, render_template
+from flask import Flask, request, jsonify, send_file, render_template, Response
+import boto3
 
 from cookie_harvester import start_harvester, COOKIE_FILE
 
 app = Flask(__name__)
 DOWNLOAD_DIR = os.path.join(os.path.dirname(__file__), "downloads")
 os.makedirs(DOWNLOAD_DIR, exist_ok=True)
+
+def get_s3_client():
+    bucket = os.environ.get("S3_BUCKET")
+    access_key = os.environ.get("S3_ACCESS_KEY_ID")
+    secret_key = os.environ.get("S3_SECRET_ACCESS_KEY")
+    if not bucket or not access_key or not secret_key:
+        return None
+    
+    region = os.environ.get("S3_REGION")
+    endpoint_url = os.environ.get("S3_ENDPOINT_URL")
+    
+    kwargs = {
+        "aws_access_key_id": access_key,
+        "aws_secret_access_key": secret_key,
+    }
+    if region:
+        kwargs["region_name"] = region
+    if endpoint_url:
+        kwargs["endpoint_url"] = endpoint_url
+        
+    return boto3.client("s3", **kwargs)
+
 
 jobs = {}
 download_executor = ThreadPoolExecutor(max_workers=5)
@@ -40,12 +63,23 @@ def cleanup_old_jobs():
                             os.remove(job["file"])
                     except OSError:
                         pass
-                try:
-                    meta_file = os.path.join(DOWNLOAD_DIR, f"{job_id}.txt")
-                    if os.path.exists(meta_file):
-                        os.remove(meta_file)
-                except OSError:
-                    pass
+                
+                meta_file = os.path.join(DOWNLOAD_DIR, f"{job_id}.txt")
+                s3_uploaded = False
+                if os.path.exists(meta_file):
+                    try:
+                        with open(meta_file, "r", encoding="utf-8") as f:
+                            meta_data_json = json.load(f)
+                            s3_uploaded = meta_data_json.get("s3_uploaded", False)
+                    except Exception:
+                        pass
+                
+                if not s3_uploaded:
+                    try:
+                        if os.path.exists(meta_file):
+                            os.remove(meta_file)
+                    except OSError:
+                        pass
 
             # 2. Clean up any orphaned files in DOWNLOAD_DIR older than 24h
             for filename in os.listdir(DOWNLOAD_DIR):
@@ -54,6 +88,16 @@ def cleanup_old_jobs():
                     try:
                         mtime = os.path.getmtime(file_path)
                         if mtime < cutoff:
+                            if filename.endswith(".txt"):
+                                s3_uploaded = False
+                                try:
+                                    with open(file_path, "r", encoding="utf-8") as f:
+                                        meta_data_json = json.load(f)
+                                        s3_uploaded = meta_data_json.get("s3_uploaded", False)
+                                except Exception:
+                                    pass
+                                if s3_uploaded:
+                                    continue
                             os.remove(file_path)
                     except OSError:
                         pass
@@ -255,7 +299,32 @@ def run_download(job_id, url, format_choice, format_id):
         meta_data["filename"] = job["filename"]
         save_meta()
 
+        # Upload to S3 if configured
+        s3_client = get_s3_client()
+        if s3_client:
+            bucket = os.environ.get("S3_BUCKET")
+            prefix = os.environ.get("S3_PREFIX", "")
+            media_key = f"{prefix}{job_id}{ext}"
+            meta_key = f"{prefix}{job_id}.txt"
+            try:
+                print(f"[S3 Upload {job_id}] Starting upload of media file {chosen} to S3 bucket {bucket} key {media_key}...", flush=True)
+                s3_client.upload_file(chosen, bucket, media_key)
+                print(f"[S3 Upload {job_id}] Media upload completed successfully.", flush=True)
+
+                # Add S3 flags to metadata
+                meta_data["s3_uploaded"] = True
+                save_meta()
+
+                print(f"[S3 Upload {job_id}] Starting upload of metadata {meta_path} to S3 bucket {bucket} key {meta_key}...", flush=True)
+                s3_client.upload_file(meta_path, bucket, meta_key)
+                print(f"[S3 Upload {job_id}] Metadata upload completed successfully.", flush=True)
+            except Exception as s3_err:
+                print(f"[S3 Upload {job_id}] Error uploading to S3: {s3_err}", flush=True)
+                meta_data["s3_upload_error"] = str(s3_err)
+                save_meta()
+
     except subprocess.TimeoutExpired:
+
         job["status"] = "error"
         job["error"] = "Download timed out (5 min limit)"
 
@@ -402,6 +471,40 @@ def list_downloads():
     if not os.path.exists(DOWNLOAD_DIR):
         return jsonify(results)
 
+    # Fetch object list from S3 if configured
+    s3_client = get_s3_client()
+    s3_metadata_keys = {}
+    s3_media_keys = {}
+    bucket = os.environ.get("S3_BUCKET")
+    prefix = os.environ.get("S3_PREFIX", "")
+
+    if s3_client and bucket:
+        try:
+            paginator = s3_client.get_paginator('list_objects_v2')
+            for page in paginator.paginate(Bucket=bucket, Prefix=prefix):
+                for obj in page.get('Contents', []):
+                    key = obj['Key']
+                    rel_name = key[len(prefix):] if key.startswith(prefix) else key
+                    if rel_name.endswith(".txt"):
+                        job_id = rel_name[:-4]
+                        s3_metadata_keys[job_id] = key
+                    else:
+                        base, ext = os.path.splitext(rel_name)
+                        if ext and ext != ".part" and ext != ".ytdl":
+                            s3_media_keys[base] = key
+        except Exception as e:
+            print(f"[S3 List] Error listing S3 objects: {e}", flush=True)
+
+        # Sync missing metadata files from S3 to local cache
+        for job_id, key in s3_metadata_keys.items():
+            local_meta_path = os.path.join(DOWNLOAD_DIR, f"{job_id}.txt")
+            if not os.path.exists(local_meta_path):
+                try:
+                    print(f"[S3 Sync] Caching missing metadata locally for {job_id} from S3 key {key}...", flush=True)
+                    s3_client.download_file(bucket, key, local_meta_path)
+                except Exception as e:
+                    print(f"[S3 Sync] Error downloading metadata key {key}: {e}", flush=True)
+
     for filename in os.listdir(DOWNLOAD_DIR):
         if filename.endswith(".txt"):
             meta_path = os.path.join(DOWNLOAD_DIR, filename)
@@ -422,6 +525,18 @@ def list_downloads():
                     else:
                         media_files.append(f)
 
+            # Determine storage locations
+            storage = []
+            if media_files:
+                storage.append("local")
+            if job_id in s3_media_keys:
+                storage.append("s3")
+
+            meta["storage"] = storage
+
+            s3_media_exists = job_id in s3_media_keys
+            s3_media_key = s3_media_keys.get(job_id)
+
             active_job = jobs.get(job_id)
             if active_job:
                 meta["status"] = active_job["status"]
@@ -429,17 +544,17 @@ def list_downloads():
                     meta["error"] = active_job["error"]
                 if "progress" in active_job:
                     meta["progress"] = active_job["progress"]
-            elif media_files:
+            elif media_files or s3_media_exists:
                 meta["status"] = "done"
                 # If filename is missing, reconstruct it
                 if not meta.get("filename"):
-                    ext = os.path.splitext(media_files[0])[1]
+                    ext = os.path.splitext(media_files[0])[1] if media_files else os.path.splitext(s3_media_key)[1]
                     title = meta.get("title", "").strip()
                     if title:
                         safe_title = "".join(c for c in title if c not in r'\/:*?"<>|').strip()[:20].strip()
-                        meta["filename"] = f"{safe_title}{ext}" if safe_title else media_files[0]
+                        meta["filename"] = f"{safe_title}{ext}" if safe_title else f"{job_id}{ext}"
                     else:
-                        meta["filename"] = media_files[0]
+                        meta["filename"] = f"{job_id}{ext}"
             elif part_files:
                 meta["status"] = "downloading"
             else:
@@ -455,42 +570,88 @@ def list_downloads():
     return jsonify(results)
 
 
+
 @app.route("/api/file/<job_id>")
 def download_file(job_id):
-    job = jobs.get(job_id)
-    if not job:
-        # Fallback to metadata .txt file if job is not in memory (e.g. server restart)
-        meta_path = os.path.join(DOWNLOAD_DIR, f"{job_id}.txt")
-        if os.path.exists(meta_path):
-            try:
-                with open(meta_path, "r", encoding="utf-8") as f:
-                    meta = json.load(f)
-                
-                # Check for media file
-                media_file = None
-                for f in os.listdir(DOWNLOAD_DIR):
-                    if f.startswith(job_id) and f != f"{job_id}.txt":
-                        if not (f.endswith(".part") or f.endswith(".ytdl")):
-                            media_file = os.path.join(DOWNLOAD_DIR, f)
-                            break
-                
-                if media_file:
-                    filename = meta.get("filename")
-                    if not filename:
-                        ext = os.path.splitext(media_file)[1]
-                        title = meta.get("title", "").strip()
-                        if title:
-                            safe_title = "".join(c for c in title if c not in r'\/:*?"<>|').strip()[:20].strip()
-                            filename = f"{safe_title}{ext}" if safe_title else os.path.basename(media_file)
-                        else:
-                            filename = os.path.basename(media_file)
-                    return send_file(media_file, as_attachment=True, download_name=filename)
-            except Exception:
-                pass
+    # 1. Try to load metadata
+    meta = None
+    meta_path = os.path.join(DOWNLOAD_DIR, f"{job_id}.txt")
+    if os.path.exists(meta_path):
+        try:
+            with open(meta_path, "r", encoding="utf-8") as f:
+                meta = json.load(f)
+        except Exception:
+            pass
 
-    if not job or job["status"] != "done":
-        return jsonify({"error": "File not ready"}), 404
-    return send_file(job["file"], as_attachment=True, download_name=job["filename"])
+    # 2. Check if a local media file exists
+    local_media_file = None
+    if os.path.exists(DOWNLOAD_DIR):
+        for f in os.listdir(DOWNLOAD_DIR):
+            if f.startswith(job_id) and f != f"{job_id}.txt":
+                if not (f.endswith(".part") or f.endswith(".ytdl")):
+                    local_media_file = os.path.join(DOWNLOAD_DIR, f)
+                    break
+
+    # 3. If local media file exists, serve it
+    if local_media_file:
+        filename = None
+        if meta:
+            filename = meta.get("filename")
+        if not filename:
+            ext = os.path.splitext(local_media_file)[1]
+            title = meta.get("title", "").strip() if meta else ""
+            if title:
+                safe_title = "".join(c for c in title if c not in r'\/:*?"<>|').strip()[:20].strip()
+                filename = f"{safe_title}{ext}" if safe_title else os.path.basename(local_media_file)
+            else:
+                filename = os.path.basename(local_media_file)
+        return send_file(local_media_file, as_attachment=True, download_name=filename)
+
+    # 4. If local file is missing, try streaming from S3 if configured
+    s3_client = get_s3_client()
+    if s3_client:
+        bucket = os.environ.get("S3_BUCKET")
+        prefix = os.environ.get("S3_PREFIX", "")
+        
+        try:
+            res = s3_client.list_objects_v2(Bucket=bucket, Prefix=f"{prefix}{job_id}.")
+            media_key = None
+            for obj in res.get("Contents", []):
+                key = obj["Key"]
+                if not key.endswith(".txt"):
+                    media_key = key
+                    break
+            
+            if media_key:
+                filename = None
+                if meta:
+                    filename = meta.get("filename")
+                if not filename:
+                    filename = os.path.basename(media_key)
+                
+                # Stream the file chunk by chunk to avoid high RAM usage
+                def generate():
+                    resp = s3_client.get_object(Bucket=bucket, Key=media_key)
+                    for chunk in resp["Body"].iter_chunks(chunk_size=1024*1024):
+                        yield chunk
+                
+                return Response(
+                    generate(),
+                    headers={
+                        "Content-Disposition": f'attachment; filename="{filename}"',
+                        "Content-Type": "application/octet-stream"
+                    }
+                )
+        except Exception as e:
+            print(f"[S3 Download] Error streaming file {job_id} from S3: {e}", flush=True)
+
+    # 5. Check active job status in memory as fallback
+    job = jobs.get(job_id)
+    if job and job["status"] == "done" and "file" in job and os.path.exists(job["file"]):
+        return send_file(job["file"], as_attachment=True, download_name=job["filename"])
+
+    return jsonify({"error": "File not found or not ready"}), 404
+
 
 
 if __name__ == "__main__":
