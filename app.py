@@ -116,6 +116,7 @@ start_harvester()
 def run_download(job_id, url, format_choice, format_id):
     job = jobs[job_id]
     job["status"] = "downloading"
+    quality = job.get("quality")
 
     # Capture fresh metadata via yt-dlp -j
     uploader = "Unknown"
@@ -144,7 +145,8 @@ def run_download(job_id, url, format_choice, format_id):
         "uploader": uploader,
         "format_choice": format_choice,
         "status": "downloading",
-        "created_at": job.get("created_at", time.time())
+        "created_at": job.get("created_at", time.time()),
+        "quality": quality
     }
 
     def save_meta():
@@ -402,6 +404,7 @@ def start_download():
     format_choice = data.get("format", "video")
     format_id = data.get("format_id")
     title = data.get("title", "")
+    quality = data.get("quality")
 
     if not url:
         return jsonify({"error": "No URL provided"}), 400
@@ -415,6 +418,7 @@ def start_download():
         "title": title,
         "format_choice": format_choice,
         "created_at": created_at,
+        "quality": quality,
     }
 
     # Save initial metadata file as queued so list_downloads reads it correctly immediately
@@ -427,7 +431,8 @@ def start_download():
             "uploader": "Unknown",
             "format_choice": format_choice,
             "status": "queued",
-            "created_at": created_at
+            "created_at": created_at,
+            "quality": quality
         }
         with open(meta_path, "w", encoding="utf-8") as f:
             json.dump(meta_data, f, indent=2)
@@ -545,6 +550,8 @@ def list_downloads():
                     meta["error"] = active_job["error"]
                 if "progress" in active_job:
                     meta["progress"] = active_job["progress"]
+                if "quality" in active_job:
+                    meta["quality"] = active_job["quality"]
             elif media_files or s3_media_exists:
                 meta["status"] = "done"
                 # If filename is missing, reconstruct it
