@@ -342,7 +342,8 @@ def run_download(job_id, url, format_choice, format_id):
 
 @app.route("/")
 def index():
-    return render_template("index.html")
+    instance_name = os.environ.get("INSTANCE_NAME", "")
+    return render_template("index.html", instance_name=instance_name)
 
 
 @app.route("/api/info", methods=["POST"])
